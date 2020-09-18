@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 
+import argparse
 import gatt
 import time
 import sys
-
-manager = gatt.DeviceManager(adapter_name='hci0')
+from influxdb import InfluxDBClient
+import datetime
 
 class AnyDevice(gatt.Device):
+    def __init__(self, args, manager):
+        super().__init__(args.mac[0], manager)
+        self.influxdb = args.influx[0]
+        self.measurements = []
+        self.manager = manager
+
     def connect_succeeded(self):
         super().connect_succeeded()
         print("[%s] Connected" % (self.mac_address))
@@ -18,7 +25,7 @@ class AnyDevice(gatt.Device):
     def disconnect_succeeded(self):
         super().disconnect_succeeded()
         print("[%s] Disconnected" % (self.mac_address))
-        manager.stop()
+        self.manager.stop()
 
     def services_resolved(self):
         super().services_resolved()
@@ -40,15 +47,58 @@ class AnyDevice(gatt.Device):
     def characteristic_enable_notifications_succeeded(self, characteristic):
         print("notify enabled")
 
-    def characteristic_value_updated(self, characteristic, value):
+    def adc_to_voltage(self, adc):
+        return adc*1.769/4096/0.49
+
+    def voltage_to_percentage(self, voltage):
+        return max(min((voltage/2-1.1)/0.00273,100),0)
+
+    def new_battery_value(self, value):
         adc = int.from_bytes(value, "little") 
-        batt = adc*1.769/4096/0.49
-        pct = max(min((batt/2-1.1)/0.00273,100),0)
+        batt = self.adc_to_voltage(adc)
+        pct = self.voltage_to_percentage(batt)
         print("{:.1f} ADC: {} BATT: {:.3f} {:.1f}%".format(time.time(), adc, batt, pct))
         sys.stdout.flush()
+        self.add_measurement(adc)
+
+    def add_measurement(self, adc):
+        self.measurements.append(adc)
+        if len(self.measurements) == 60:
+            avg = sum(self.measurements) / len(self.measurements)
+            voltage = self.adc_to_voltage(avg)
+            fields = {
+                "adc": avg,
+                "battery": voltage,
+                "samples": len(self.measurements),
+                "percent": self.voltage_to_percentage(voltage)
+            }
+            updateDatabase(self.influxdb, fields)
+            self.measurements = []
+
+    def characteristic_value_updated(self, characteristic, value):
+        if characteristic.uuid == "00453ed2-f5e0-11ea-b224-00155df38b92":
+            self.new_battery_value(value)
+
+def updateDatabase(hostname,fields):
+    ts = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
+    json_body = [
+        {
+            "measurement": "voltage",
+            "time": ts,
+            "fields": fields,
+        }
+    ]
+    client = InfluxDBClient(hostname, 8086, '', '', 'nrf52')
+    client.write_points(json_body)
 
 
-device = AnyDevice(mac_address='c1:8f:48:c0:9c:cf', manager=manager)
+parser = argparse.ArgumentParser(description="receive bluetooth data")
+parser.add_argument("--mac", nargs=1, required=True, dest="mac", type=str, help="bluetooth mac address")
+parser.add_argument("--influx-host", nargs=1, required=True, dest="influx", type=str, help="influxdb hostname")
+args = parser.parse_args()
+
+manager = gatt.DeviceManager(adapter_name='hci0')
+device = AnyDevice(args, manager=manager)
 
 while 1:
     print("starting")
