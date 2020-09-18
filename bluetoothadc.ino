@@ -33,10 +33,6 @@ uint8_t batteryUuidBytes[16] =
 BLEUuid batteryUuid = BLEUuid(batteryUuidBytes);
 BLEUuid batterySvcUuid = BLEUuid(batterySvcUuidBytes);
 
-/* Health Thermometer Service Definitions
- * Health Thermometer Service:  0x1809
- * Temperature Measurement Char: 0x2A1C
- */
 BLEService        htms = BLEService(batterySvcUuid);
 BLECharacteristic htmc = BLECharacteristic(batteryUuid);
 
