@@ -6,11 +6,15 @@ import time
 import sys
 from influxdb import InfluxDBClient
 import datetime
+from struct import unpack
 
 class AnyDevice(gatt.Device):
     def __init__(self, args, manager):
         super().__init__(args.mac[0], manager)
-        self.influxdb = args.influx[0]
+        if args.influx != None:
+            self.influxdb = args.influx[0]
+        else:
+            self.influxdb = None
         self.measurements = []
         self.manager = manager
 
@@ -54,26 +58,30 @@ class AnyDevice(gatt.Device):
         return max(min((voltage/2-1.1)/0.00273,100),0)
 
     def new_battery_value(self, value):
-        adc = int.from_bytes(value, "little") 
+        (adc, x, y, z) = unpack("<H3h", value)
         batt = self.adc_to_voltage(adc)
         pct = self.voltage_to_percentage(batt)
-        print("{:.1f} ADC: {} BATT: {:.3f} {:.1f}%".format(time.time(), adc, batt, pct))
+        print("{:.1f} ADC: {} BATT: {:.3f} {:.1f}% [{}, {}, {}]".format(time.time(), adc, batt, pct, x, y, z))
         sys.stdout.flush()
-        self.add_measurement(adc)
+        self.add_measurement(adc, x, y, z)
 
-    def add_measurement(self, adc):
+    def add_measurement(self, adc, x, y, z):
         self.measurements.append(adc)
-        if len(self.measurements) == 60:
+        if len(self.measurements) >= 60:
             avg = sum(self.measurements) / len(self.measurements)
+            samples = len(self.measurements)
+            self.measurements = []
             voltage = self.adc_to_voltage(avg)
             fields = {
                 "adc": avg,
                 "battery": voltage,
-                "samples": len(self.measurements),
+                "samples": samples,
+                "x": x,
+                "y": y,
+                "z": z,
                 "percent": self.voltage_to_percentage(voltage)
             }
             updateDatabase(self.influxdb, fields)
-            self.measurements = []
 
     def characteristic_value_updated(self, characteristic, value):
         if characteristic.uuid == "00453ed2-f5e0-11ea-b224-00155df38b92":
@@ -88,13 +96,14 @@ def updateDatabase(hostname,fields):
             "fields": fields,
         }
     ]
-    client = InfluxDBClient(hostname, 8086, '', '', 'nrf52')
-    client.write_points(json_body)
-
+    if hostname != None:
+        client = InfluxDBClient(hostname, 8086, '', '', 'nrf52')
+        client.write_points(json_body)
+        print("JSON: {}".format(json_body))
 
 parser = argparse.ArgumentParser(description="receive bluetooth data")
 parser.add_argument("--mac", nargs=1, required=True, dest="mac", type=str, help="bluetooth mac address")
-parser.add_argument("--influx-host", nargs=1, required=True, dest="influx", type=str, help="influxdb hostname")
+parser.add_argument("--influx-host", nargs=1, required=False, dest="influx", type=str, help="influxdb hostname")
 args = parser.parse_args()
 
 manager = gatt.DeviceManager(adapter_name='hci0')
